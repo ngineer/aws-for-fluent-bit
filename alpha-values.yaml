@@ -1,0 +1,267 @@
+global:
+## Override the deployment namespace
+#   namespaceOverride:
+
+image:
+  repository: public.ecr.aws/aws-observability/aws-for-fluent-bit
+  tag: 2.28.4
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+service:
+  extraService: |
+    Flush                     5
+    Log_Level                 info
+    Daemon                    off
+    Grace                     30
+    HTTP_Server               On
+    HTTP_Listen               0.0.0.0
+    HTTP_PORT                 2020
+    storage.path              /var/fluent-bit/state/flb-storage/
+    storage.sync              normal
+    storage.checksum          off
+    storage.backlog.mem_limit 128MB
+  extraParsers: |
+    [PARSER]
+        Name                syslog
+        Format              regex
+        Regex               ^(?<time>[^ ]* {1,2}[^ ]* [^ ]*) (?<host>[^ ]*) (?<ident>[a-zA-Z0-9_\/\.\-]*)(?:\[(?<pid>[0-9]+)\])?(?:[^\:]*\:)? *(?<message>.*)$
+        Time_Key            time
+        Time_Format         %b %d %H:%M:%S
+    [PARSER]
+        Name                container_firstline
+        Format              regex
+        Regex               (?<log>(?<="log":")\S(?!\.).*?)(?<!\\)".*(?<stream>(?<="stream":").*?)".*(?<time>\d{4}-\d{1,2}-\d{1,2}T\d{2}:\d{2}:\d{2}\.\w*).*(?=})
+        Time_Key            time
+        Time_Format         %Y-%m-%dT%H:%M:%S.%LZ
+    [PARSER]
+        Name                cwagent_firstline
+        Format              regex
+        Regex               (?<log>(?<="log":")\d{4}[\/-]\d{1,2}[\/-]\d{1,2}[ T]\d{2}:\d{2}:\d{2}(?!\.).*?)(?<!\\)".*(?<stream>(?<="stream":").*?)".*(?<time>\d{4}-\d{1,2}-\d{1,2}T\d{2}:\d{2}:\d{2}\.\w*).*(?=})
+        Time_Key            time
+        Time_Format         %Y-%m-%dT%H:%M:%S.%LZ
+
+input:
+  enabled: true
+  tag: "application.*"
+  path: "/var/log/containers/*.log"
+  db: "/var/fluent-bit/state/flb_container.db"
+  parser: docker, cri
+  memBufLimit: 50MB
+  skipLongLines: "On"
+  refreshInterval: 10
+  extraInputs: |
+    Rotate_Wait           30
+    storage.type          filesystem
+    Read_from_Head        Off
+    Exclude_Path          /var/log/containers/cloudwatch-agent*, /var/log/containers/aws-for-fluent-bit*, /var/log/containers/aws-node*, /var/log/containers/kube-proxy*
+
+additionalInputs: |
+  [INPUT]
+      Name                  tail
+      Tag                   application.*
+      Path                  /var/log/containers/aws-for-fluent-bit*
+      multiline.parser      docker, cri
+      DB                    /var/fluent-bit/state/flb_log.db
+      Mem_Buf_Limit       100MB
+      Skip_Long_Lines     On
+      Refresh_Interval    10
+      Read_from_Head      Off
+  [INPUT]
+      Name                tail
+      Tag                 application.*
+      Path                /var/log/containers/cloudwatch-agent*
+      multiline.parser    docker, cri
+      DB                  /var/fluent-bit/state/flb_cwagent.db
+      Mem_Buf_Limit       50MB
+      Skip_Long_Lines     On
+      Refresh_Interval    10
+      Read_from_Head      Off
+  [INPUT]
+      Name                systemd
+      Tag                 dataplane.systemd.*
+      Systemd_Filter      _SYSTEMD_UNIT=docker.service
+      Systemd_Filter      _SYSTEMD_UNIT=kubelet.service
+      DB                  /var/fluent-bit/state/systemd.db
+      Path                /var/log/journal
+      Read_From_Tail      On
+  [INPUT]
+      Name                tail
+      Tag                 dataplane.tail.*
+      Path                /var/log/containers/aws-node*, /var/log/containers/kube-proxy*
+      multiline.parser    docker, cri
+      DB                  /var/fluent-bit/state/flb_dataplane_tail.db
+      Mem_Buf_Limit       50MB
+      Skip_Long_Lines     On
+      Refresh_Interval    10
+      Rotate_Wait         30
+      storage.type        filesystem
+      Read_from_Head      Off
+  [INPUT]
+      Name                tail
+      Tag                 host.dmesg
+      Path                /var/log/dmesg
+      Parser              syslog
+      DB                  /var/fluent-bit/state/flb_dmesg.db
+      Mem_Buf_Limit       50MB
+      Skip_Long_Lines     On
+      Refresh_Interval    10
+      Read_from_Head      Off
+  [INPUT]
+      Name                tail
+      Tag                 host.messages
+      Path                /var/log/messages
+      Parser              syslog
+      DB                  /var/fluent-bit/state/flb_messages.db
+      Mem_Buf_Limit       ${INPUT_HOST_MESSAGES_MEM_BUF_LIMIT}
+      Skip_Long_Lines     On
+      Refresh_Interval    10
+      Read_from_Head      Off
+  [INPUT]
+      Name                tail
+      Tag                 host.secure
+      Path                /var/log/secure
+      Parser              syslog
+      DB                  /var/fluent-bit/state/flb_secure.db
+      Mem_Buf_Limit       50MB
+      Skip_Long_Lines     On
+      Refresh_Interval    10
+      Read_from_Head      Off
+
+filter:
+  match: "application.*"
+  kubeURL: "https://kubernetes.default.svc.cluster.local:443"
+  mergeLog: "On"
+  mergeLogKey: "log_processed"
+  keepLog: "On"
+  k8sLoggingParser: "On"
+  k8sLoggingExclude: "Off"
+  bufferSize: "0"
+  extraFilters: |
+    Kube_Tag_Prefix     application.var.log.containers.
+    Labels              Off
+    Annotations         Off
+    Use_Kubelet         true
+    Kubelet_Port        10250
+    Kube_CA_File        /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+    Kube_Token_File     /var/run/secrets/kubernetes.io/serviceaccount/token
+
+additionalFilters: |
+  [FILTER]
+      Name                modify
+      Match               dataplane.systemd.*
+      Rename              _HOSTNAME                   hostname
+      Rename              _SYSTEMD_UNIT               systemd_unit
+      Rename              MESSAGE                     message
+      Remove_regex        ^((?!hostname|systemd_unit|message).)*$
+  [FILTER]
+      Name                aws
+      Match               dataplane.*
+      imds_version        v2
+  [FILTER]
+      Name                aws
+      Match               host.*
+      imds_version        v2
+
+additionalOutputs: |
+   [OUTPUT]
+       Name               cloudwatch_logs
+       Match              dataplane.*
+       region             eu-west-2
+       log_group_name     /aws/eks/containerinsights/eks-dev-private-cluster/application
+       log_stream_prefix  /aws/eks/eks-dev-private-cluster
+       auto_create_group  false
+       extra_user_agent   container-insights
+   [OUTPUT]
+      Name                cloudwatch_logs
+      Match               host.*
+      region              eu-west-2
+      log_group_name      ${LOG_GROUP_NAME}
+      log_stream_prefix   ${HOST_NAME}-
+      auto_create_group   false
+      extra_user_agent    container-insights
+
+serviceAccount:
+  create: true
+  annotations:
+    "eks.amazonaws.com/role-arn": arn:aws:iam::184892313502:role/fluentbit-role
+  name: fluentbit-sa-role
+
+resources:
+  limits:
+    memory: 250Mi
+  requests:
+    cpu: 50m
+    memory: 50Mi
+
+## Assign a PriorityClassName to pods if set
+# priorityClassName: system-node-critical
+
+updateStrategy:
+  type: RollingUpdate
+
+nodeSelector: {}
+
+tolerations:
+  - key: node-role.kubernetes.io/master
+    operator: Exists
+    effect: NoSchedule
+  - operator: "Exists"
+    effect: "NoExecute"
+  - operator: "Exists"
+    effect: "NoSchedule"
+
+hostNetwork: false
+dnsPolicy: ClusterFirst
+
+# env: []
+## To add extra environment variables to the pods, add as below
+env:
+#   - name: AWS_REGION
+#     valueFrom:
+#       configMapKeyRef:
+#         name: fluent-bit-cluster-info
+#         key: logs.region
+   - name: CLUSTER_NAME
+     value: eks-dev-private-cluster
+   - name: HOST_NAME
+     valueFrom:
+       fieldRef:
+         fieldPath: spec.nodeName
+
+volumes:
+  - name: varlog
+    hostPath:
+      path: /var/log
+  - name: varlibdockercontainers
+    hostPath:
+      path: /var/lib/docker/containers
+  - name: fluentbitstate
+    hostPath:
+      path: /var/fluent-bit/state
+      type: ""
+  - name: runlogjournal
+    hostPath:
+      path: /run/log/journal
+  - name: dmesg
+    hostPath:
+      path: /var/log/dmesg
+
+volumeMounts:
+  - name: varlog
+    mountPath: /var/log
+    readOnly: true
+  - name: varlibdockercontainers
+    mountPath: /var/lib/docker/containers
+    readOnly: true
+  - name: fluentbitstate
+    mountPath: /var/fluent-bit/state
+    mountPropagation: None
+  - name: runlogjournal
+    mountPath: /run/log/journal
+    readOnly: true
+
+
