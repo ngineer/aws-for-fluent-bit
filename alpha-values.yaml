@@ -1,25 +1,18 @@
 global:
-## Override the deployment namespace
-#   namespaceOverride:
-
+  # Override the deployment namespace
 image:
   repository: public.ecr.aws/aws-observability/aws-for-fluent-bit
   tag: 2.28.4
   pullPolicy: IfNotPresent
-
-imagePullSecrets: []
-nameOverride: ""
-fullnameOverride: ""
-
 service:
   extraService: |
     Flush                     5
     Log_Level                 info
     Daemon                    off
     Grace                     30
-    HTTP_Server               On
-    HTTP_Listen               0.0.0.0
-    HTTP_PORT                 2020
+    HTTP_Server  On
+    HTTP_Listen  0.0.0.0
+    HTTP_PORT    2020
     storage.path              /var/fluent-bit/state/flb-storage/
     storage.sync              normal
     storage.checksum          off
@@ -43,9 +36,7 @@ service:
         Regex               (?<log>(?<="log":")\d{4}[\/-]\d{1,2}[\/-]\d{1,2}[ T]\d{2}:\d{2}:\d{2}(?!\.).*?)(?<!\\)".*(?<stream>(?<="stream":").*?)".*(?<time>\d{4}-\d{1,2}-\d{1,2}T\d{2}:\d{2}:\d{2}\.\w*).*(?=})
         Time_Key            time
         Time_Format         %Y-%m-%dT%H:%M:%S.%LZ
-
 input:
-  enabled: true
   tag: "application.*"
   path: "/var/log/containers/*.log"
   db: "/var/fluent-bit/state/flb_container.db"
@@ -54,18 +45,37 @@ input:
   skipLongLines: "On"
   refreshInterval: 10
   extraInputs: |
-    Rotate_Wait           30
-    storage.type          filesystem
-    Read_from_Head        Off
-    Exclude_Path          /var/log/containers/cloudwatch-agent*, /var/log/containers/aws-for-fluent-bit*, /var/log/containers/aws-node*, /var/log/containers/kube-proxy*
+    Rotate_Wait         30
+    storage.type        filesystem
+    Read_from_Head      Off
+    Exclude_Path        /var/log/containers/cloudwatch-agent*, /var/log/containers/aws-for-fluent-bit*, /var/log/containers/aws-node*, /var/log/containers/kube-proxy*
 
+filter:
+  match: "application.*"
+  kubeURL: "https://kubernetes.default.svc.cluster.local:443"
+  mergeLog: "On"
+  mergeLogKey: "log_processed"
+  keepLog: "On"
+  k8sLoggingParser: "On"
+  k8sLoggingExclude: "Off"
+  bufferSize: "0"
+  # Uncomment the extraFilters to use Kubelet to get the Metadata instead of talking to API server for large clusters
+  # Check this link for more details https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/ContainerInsights-use-kubelet.html
+  extraFilters: |
+    Kube_Tag_Prefix     application.var.log.containers.
+    Labels              Off
+    Annotations         Off
+    Use_Kubelet         true
+    Kubelet_Port        10250
+    Kube_CA_File        /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+    Kube_Token_File     /var/run/secrets/kubernetes.io/serviceaccount/token
 additionalInputs: |
   [INPUT]
-      Name                  tail
-      Tag                   application.*
-      Path                  /var/log/containers/aws-for-fluent-bit*
-      multiline.parser      docker, cri
-      DB                    /var/fluent-bit/state/flb_log.db
+      Name                tail
+      Tag                 application.*
+      Path                /var/log/containers/aws-for-fluent-bit*
+      multiline.parser    docker, cri
+      DB                  /var/fluent-bit/state/flb_log.db
       Mem_Buf_Limit       100MB
       Skip_Long_Lines     On
       Refresh_Interval    10
@@ -116,7 +126,7 @@ additionalInputs: |
       Path                /var/log/messages
       Parser              syslog
       DB                  /var/fluent-bit/state/flb_messages.db
-      Mem_Buf_Limit       ${INPUT_HOST_MESSAGES_MEM_BUF_LIMIT}
+      Mem_Buf_Limit       50MB
       Skip_Long_Lines     On
       Refresh_Interval    10
       Read_from_Head      Off
@@ -130,25 +140,6 @@ additionalInputs: |
       Skip_Long_Lines     On
       Refresh_Interval    10
       Read_from_Head      Off
-
-filter:
-  match: "application.*"
-  kubeURL: "https://kubernetes.default.svc.cluster.local:443"
-  mergeLog: "On"
-  mergeLogKey: "log_processed"
-  keepLog: "On"
-  k8sLoggingParser: "On"
-  k8sLoggingExclude: "Off"
-  bufferSize: "0"
-  extraFilters: |
-    Kube_Tag_Prefix     application.var.log.containers.
-    Labels              Off
-    Annotations         Off
-    Use_Kubelet         true
-    Kubelet_Port        10250
-    Kube_CA_File        /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
-    Kube_Token_File     /var/run/secrets/kubernetes.io/serviceaccount/token
-
 additionalFilters: |
   [FILTER]
       Name                modify
@@ -160,51 +151,83 @@ additionalFilters: |
   [FILTER]
       Name                aws
       Match               dataplane.*
-      imds_version        v2
+      imds_version        v1
   [FILTER]
       Name                aws
       Match               host.*
-      imds_version        v2
+      imds_version        v1
+cloudWatch:
+  enabled: true
+  match: "application.*"
+  region: "eu-west-1"
+  logGroupName: "/aws/eks/containerinsights/eks-dev-private-cluster/application"
+  logStreamPrefix: "eks-dev-private-cluster"
+  autoCreateGroup: true
+  extraOutputs: |
+    auto_create_group     false
+    extra_user_agent      container-insights
 
+s3:
+  enabled: true
+  match: "application.*"
+  bucket: "alpha-dev-private-eks-logs"
+  region: "eu-west-1"
+  jsonDateKey: "date"
+  jsonDateFormat: "iso8601"
+  totalFileSize: "100M"
+  uploadChunkSize: "6M"
+  uploadTimeout: "10m"
+  storeDir: "/tmp/fluent-bit/s3"
+  storeDirLimitSize: 0
+  s3KeyFormat: /eks-dev-private-cluster/$TAG/%Y-%m-%d/%H-%M-%S
+  s3KeyFormatTagDelimiters: ".-"
+  staticFilePath: false
+  usePutObject: false
+
+firehose:
+  enabled: false
+kinesis:
+  enabled: false
+elasticsearch:
+  enabled: false
 additionalOutputs: |
-   [OUTPUT]
-       Name               cloudwatch_logs
-       Match              dataplane.*
-       region             eu-west-2
-       log_group_name     /aws/eks/containerinsights/eks-dev-private-cluster/application
-       log_stream_prefix  /aws/eks/eks-dev-private-cluster
-       auto_create_group  false
-       extra_user_agent   container-insights
-   [OUTPUT]
+  [OUTPUT]
+      Name                cloudwatch_logs
+      Match               dataplane.*
+      region              eu-west-1
+      log_group_name      /aws/eks/containerinsights/eks-dev-private-cluster/dataplane
+      log_stream_prefix   eks-dev-private-cluster
+      auto_create_group   true
+      extra_user_agent    container-insights
+  [OUTPUT]
       Name                cloudwatch_logs
       Match               host.*
-      region              eu-west-2
-      log_group_name      ${LOG_GROUP_NAME}
-      log_stream_prefix   ${HOST_NAME}-
-      auto_create_group   false
+      region              eu-west-1
+      log_group_name      /aws/eks/containerinsights/eks-dev-private-cluster/host
+      log_stream_prefix   eks-dev-private-cluster
+      auto_create_group   true
       extra_user_agent    container-insights
-
+  [OUTPUT]
+      Name                         s3
+      Match                        dataplane.*
+      bucket                       alpha-dev-private-eks-logs
+      region                       eu-west-1
+      s3_key_format                /eks-dev-private-cluster/dataplane/$TAG/%Y-%m-%d/%H-%M-%S
+      s3_key_format_tag_delimiters .-
+      use_put_object               false
+      tls                          Off
 serviceAccount:
   create: true
-  annotations:
+  annotations: {
     "eks.amazonaws.com/role-arn": arn:aws:iam::184892313502:role/fluentbit-role
+  }
   name: fluentbit-sa-role
-
 resources:
   limits:
-    memory: 250Mi
+    memory: 1500Mi
   requests:
     cpu: 50m
-    memory: 50Mi
-
-## Assign a PriorityClassName to pods if set
-# priorityClassName: system-node-critical
-
-updateStrategy:
-  type: RollingUpdate
-
-nodeSelector: {}
-
+    memory: 500Mi
 tolerations:
   - key: node-role.kubernetes.io/master
     operator: Exists
@@ -213,55 +236,44 @@ tolerations:
     effect: "NoExecute"
   - operator: "Exists"
     effect: "NoSchedule"
-
-hostNetwork: false
-dnsPolicy: ClusterFirst
-
-# env: []
-## To add extra environment variables to the pods, add as below
+hostNetwork: true
+dnsPolicy: ClusterFirstWithHostNet
 env:
-#   - name: AWS_REGION
-#     valueFrom:
-#       configMapKeyRef:
-#         name: fluent-bit-cluster-info
-#         key: logs.region
-   - name: CLUSTER_NAME
-     value: eks-dev-private-cluster
-   - name: HOST_NAME
-     valueFrom:
-       fieldRef:
-         fieldPath: spec.nodeName
-
+  - name: HOST_NAME
+    valueFrom:
+      fieldRef:
+        apiVersion: v1
+        fieldPath: spec.nodeName
 volumes:
-  - name: varlog
-    hostPath:
-      path: /var/log
-  - name: varlibdockercontainers
-    hostPath:
-      path: /var/lib/docker/containers
-  - name: fluentbitstate
-    hostPath:
+  - hostPath:
       path: /var/fluent-bit/state
       type: ""
+    name: fluentbitstate
+  - hostPath:
+      path: /var/lib/docker/containers
+    name: varlibdockercontainers
+  - hostPath:
+      path: /var/log
+    name: varlog
   - name: runlogjournal
     hostPath:
       path: /run/log/journal
   - name: dmesg
     hostPath:
       path: /var/log/dmesg
-
 volumeMounts:
-  - name: varlog
-    mountPath: /var/log
-    readOnly: true
-  - name: varlibdockercontainers
-    mountPath: /var/lib/docker/containers
-    readOnly: true
-  - name: fluentbitstate
-    mountPath: /var/fluent-bit/state
+  - mountPath: /var/fluent-bit/state
     mountPropagation: None
+    name: fluentbitstate
+  - mountPath: /var/lib/docker/containers
+    name: varlibdockercontainers
+    readOnly: true
+  - mountPath: /var/log
+    name: varlog
+    readOnly: true
+  - name: dmesg
+    mountPath: /var/log/dmesg
+    readOnly: true
   - name: runlogjournal
     mountPath: /run/log/journal
     readOnly: true
-
-
